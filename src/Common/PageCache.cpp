@@ -34,6 +34,9 @@ namespace ErrorCodes
     extern const int FILE_DOESNT_EXIST;
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wreadability-make-member-function-const"
+
 PinnedPageChunk::PinnedPageChunk(PinnedPageChunk && c) noexcept
     : cache(std::exchange(c.cache, nullptr)), chunk_(std::exchange(c.chunk_, nullptr)) {}
 
@@ -81,7 +84,7 @@ AtomicBitSet::AtomicBitSet() = default;
 void AtomicBitSet::init(size_t nn)
 {
     n = nn;
-    v.reset(new std::atomic<UInt8>[(n + 7) / 8]);
+    v = std::make_unique<std::atomic<UInt8>[]>((n + 7) / 8);
 }
 
 bool AtomicBitSet::get(size_t i) const
@@ -186,7 +189,7 @@ size_t PageCache::getResidentSetSize() const
     if (use_madv_free)
     {
         std::unordered_set<UInt64> cache_mmap_addrs;
-        for (auto & m : mmaps)
+        for (const auto & m : mmaps)
             cache_mmap_addrs.insert(reinterpret_cast<UInt64>(m.ptr));
 
         ReadBufferFromFile in("/proc/self/smaps");
@@ -237,7 +240,7 @@ size_t PageCache::getResidentSetSize() const
                 if (s.size() < 16)
                     s.insert(0, 16 - s.size(), '0');
                 UInt64 addr = unhexUInt<UInt64>(s.c_str());
-                current_range_is_cache = cache_mmap_addrs.count(addr) != 0;
+                current_range_is_cache = cache_mmap_addrs.contains(addr) != 0;
             }
             else if (s == "Rss:" && current_range_is_cache)
             {
@@ -269,7 +272,7 @@ PinnedPageChunk PageCache::getOrSet(PageCacheKey key, bool detached_if_missing, 
     {
         std::unique_lock lock(global_mutex);
 
-        auto it = chunk_by_key.find(key);
+        auto * it = chunk_by_key.find(key);
         if (it == chunk_by_key.end())
         {
             chunk = getFreeChunk(lock);
@@ -422,7 +425,7 @@ void PageCache::sendChunkToLimbo(PageChunk * chunk, std::unique_lock<std::mutex>
 
 std::pair<size_t, size_t> PageCache::restoreChunkFromLimbo(PageChunk * chunk, std::unique_lock<std::mutex> & /* chunk_mutex */) noexcept
 {
-    auto data = const_cast<volatile char *>(chunk->data); // make sure our strategic memory reads/writes are not reordered or optimized out
+    auto * data = const_cast<volatile char *>(chunk->data); // make sure our strategic memory reads/writes are not reordered or optimized out
     size_t pages_restored = 0;
     size_t pages_evicted = 0;
     for (size_t idx = 0; idx < chunk->size / bytes_per_page; ++idx)
@@ -531,14 +534,14 @@ void PageCache::dropCache()
 
     /// Detach and free unpinned chunks.
     bool logged_error = false;
-    for (auto it = lru.begin(); it != lru.end(); ++it)
+    for (PageChunk & chunk : lru)
     {
-        evictChunk(&*it, lock);
+        evictChunk(&chunk, lock);
 
         if (use_madv_free)
         {
             /// This might happen in parallel with sendChunkToLimbo() or restoreChunkFromLimbo(), but it's ok.
-            int r = madvise(it->data, it->size, MADV_DONTNEED);
+            int r = madvise(chunk.data, chunk.size, MADV_DONTNEED);
             if (r != 0 && !logged_error)
             {
                 logUnexpectedSyscallError("madvise(MADV_DONTNEED)");
@@ -565,7 +568,7 @@ PageCache::Mmap::Mmap(size_t bytes_per_page_, size_t pages_per_chunk_, size_t pa
     size_t alignment = bytes_per_page_ * pages_per_big_page_;
     address_hint = reinterpret_cast<void*>(reinterpret_cast<UInt64>(address_hint) / alignment * alignment);
 
-    std::unique_ptr<PageChunk[]> temp_chunks(new PageChunk[num_chunks]);
+    auto temp_chunks = std::make_unique<PageChunk[]>(num_chunks);
 
     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
 #ifdef OS_LINUX
@@ -645,5 +648,7 @@ std::string FileChunkAddress::toString() const
 {
     return fmt::format("{}:{}:{}{}{}", disk_name, path, offset, file_version.empty() ? "" : ":", file_version);
 }
+
+#pragma clang diagnostic pop
 
 }
