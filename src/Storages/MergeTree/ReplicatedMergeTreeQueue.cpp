@@ -1802,6 +1802,10 @@ std::map<int64_t, MutationCommands> ReplicatedMergeTreeQueue::getAlterMutationCo
     /// of part's metadata.
     for (const auto & [mutation_version, mutation_status] : in_partition->second | std::views::reverse)
     {
+        /// is_done is monotonous so we can stop the loop.
+        if (mutation_status->is_done)
+            break;
+
         auto alter_version = mutation_status->entry->alter_version;
         if (alter_version != -1)
         {
@@ -1818,7 +1822,7 @@ std::map<int64_t, MutationCommands> ReplicatedMergeTreeQueue::getAlterMutationCo
         }
     }
 
-    LOG_TRACE(log, "Got {} commands for part {} (part data version {}, part metadata version {})",
+    LOG_TEST(log, "Got {} commands for part {} (part data version {}, part metadata version {})",
         result.size(), part->name, part_data_version, part_metadata_version);
 
     return result;
