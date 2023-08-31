@@ -123,6 +123,14 @@ void MergeTreeIndexGranuleBloomFilter::serializeBinary(WriteBuffer & ostr) const
     }
 }
 
+size_t MergeTreeIndexGranuleBloomFilter::memoryUsageBytes() const
+{
+    size_t sum = 0;
+    for (const auto & bloom_filter : bloom_filters)
+        sum += bloom_filter->memoryUsageBytes();
+    return sum;
+}
+
 void MergeTreeIndexGranuleBloomFilter::fillingBloomFilter(BloomFilterPtr & bf, const Block & granule_index_block, size_t index_hash_column) const
 {
     const auto & column = granule_index_block.getByPosition(index_hash_column);

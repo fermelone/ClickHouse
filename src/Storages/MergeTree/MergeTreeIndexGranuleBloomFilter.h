@@ -18,6 +18,8 @@ public:
     void serializeBinary(WriteBuffer & ostr) const override;
     void deserializeBinary(ReadBuffer & istr, MergeTreeIndexVersion version) override;
 
+    size_t memoryUsageBytes() const override;
+
     const std::vector<BloomFilterPtr> & getFilters() const { return bloom_filters; }
 
 private:
