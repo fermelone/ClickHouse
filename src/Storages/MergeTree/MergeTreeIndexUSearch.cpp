@@ -15,6 +15,16 @@
 #include <Interpreters/Context.h>
 #include <Interpreters/castColumn.h>
 
+namespace ProfileEvents
+{
+    extern const Event USearchAddCount;
+    extern const Event USearchAddVisitedMembers;
+    extern const Event USearchAddComputedDistances;
+    extern const Event USearchSearchCount;
+    extern const Event USearchSearchVisitedMembers;
+    extern const Event USearchSearchComputedDistances;
+}
+
 namespace DB
 {
 
@@ -30,7 +40,7 @@ namespace ErrorCodes
 
 template <unum::usearch::metric_kind_t Metric>
 USearchIndexWithSerialization<Metric>::USearchIndexWithSerialization(size_t dimensions)
-    : Base(Base::make(unum::usearch::metric_punned_t(dimensions, Metric)))
+    : Base(Base::make(unum::usearch::metric_punned_t(dimensions, Metric, unum::usearch::scalar_kind_t::f16_k)))
 {
 }
 
@@ -151,6 +161,8 @@ void MergeTreeIndexAggregatorUSearch<Metric>::update(const Block & block, size_t
         const auto & offsets = column_array->getOffsets();
         const size_t num_rows = offsets.size();
 
+        if (num_rows > static_cast<size_t>(UINT32_MAX))
+            throw Exception(ErrorCodes::INCORRECT_DATA, "Index granularity is too big: more than 4B rows per index granule.");
 
         /// Check all sizes are the same
         size_t size = offsets[0];
@@ -165,12 +177,16 @@ void MergeTreeIndexAggregatorUSearch<Metric>::update(const Block & block, size_t
         if (!index->reserve(unum::usearch::ceil2(index->size() + num_rows)))
             throw Exception(ErrorCodes::CANNOT_ALLOCATE_MEMORY, "Could not reserve memory for usearch index");
 
-        if (auto rc = index->add(index->size(), array.data()); !rc)
-            throw Exception(ErrorCodes::INCORRECT_DATA, rc.error.release());
-        for (size_t current_row = 1; current_row < num_rows; ++current_row)
-            if (auto rc = index->add(index->size(), &array[offsets[current_row - 1]]); !rc)
+        for (size_t current_row = 0; current_row < num_rows; ++current_row)
+        {
+            auto rc = index->add(static_cast<uint32_t>(index->size()), &array[offsets[current_row - 1]]);
+            if (!rc)
                 throw Exception(ErrorCodes::INCORRECT_DATA, rc.error.release());
 
+            ProfileEvents::increment(ProfileEvents::USearchAddCount);
+            ProfileEvents::increment(ProfileEvents::USearchAddVisitedMembers, rc.visited_members);
+            ProfileEvents::increment(ProfileEvents::USearchAddComputedDistances, rc.computed_distances);
+        }
     }
     else if (const auto & column_tuple = typeid_cast<const ColumnTuple *>(column_cut.get()))
     {
@@ -193,8 +209,15 @@ void MergeTreeIndexAggregatorUSearch<Metric>::update(const Block & block, size_t
             throw Exception(ErrorCodes::CANNOT_ALLOCATE_MEMORY, "Could not reserve memory for usearch index");
 
         for (const auto & item : data)
-            if (auto rc = index->add(index->size(), item.data()); !rc)
+        {
+            auto rc = index->add(static_cast<uint32_t>(index->size()), item.data());
+            if (!rc)
                 throw Exception(ErrorCodes::INCORRECT_DATA, rc.error.release());
+
+            ProfileEvents::increment(ProfileEvents::USearchAddCount);
+            ProfileEvents::increment(ProfileEvents::USearchAddVisitedMembers, rc.visited_members);
+            ProfileEvents::increment(ProfileEvents::USearchAddComputedDistances, rc.computed_distances);
+        }
     }
     else
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Expected Array or Tuple column");
@@ -257,7 +280,12 @@ std::vector<size_t> MergeTreeIndexConditionUSearch::getUsefulRangesImpl(MergeTre
             ann_condition.getDimensions(), index->dimensions());
 
     auto result = index->search(reference_vector.data(), limit);
-    std::vector<UInt64> neighbors(result.size()); /// indexes of dots which were closest to the reference vector
+
+    ProfileEvents::increment(ProfileEvents::USearchSearchCount);
+    ProfileEvents::increment(ProfileEvents::USearchSearchVisitedMembers, result.visited_members);
+    ProfileEvents::increment(ProfileEvents::USearchSearchComputedDistances, result.computed_distances);
+
+    std::vector<uint32_t> neighbors(result.size()); /// indexes of dots which were closest to the reference vector
     std::vector<Float32> distances(result.size());
     result.dump_to(neighbors.data(), distances.data());
 
@@ -267,7 +295,7 @@ std::vector<size_t> MergeTreeIndexConditionUSearch::getUsefulRangesImpl(MergeTre
     {
         if (comparison_distance && distances[i] > comparison_distance)
             continue;
-        granule_numbers.push_back(neighbors[i] / index_granularity);
+        granule_numbers.push_back(static_cast<size_t>(neighbors[i]) / index_granularity);
     }
 
     /// make unique

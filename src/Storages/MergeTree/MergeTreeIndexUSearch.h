@@ -12,10 +12,12 @@
 namespace DB
 {
 
+using USearchImplType = unum::usearch::index_dense_gt</* key_at */ uint32_t, /* compressed_slot_at */ uint32_t>;
+
 template <unum::usearch::metric_kind_t Metric>
-class USearchIndexWithSerialization : public unum::usearch::index_dense_t
+class USearchIndexWithSerialization : public USearchImplType
 {
-    using Base = unum::usearch::index_dense_t;
+    using Base = USearchImplType;
 
 public:
     explicit USearchIndexWithSerialization(size_t dimensions);
